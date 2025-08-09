@@ -1,77 +1,83 @@
-import express from "express";
-import axios from "axios";
-import bodyParser from "body-parser";
-import vision from "@google-cloud/vision";
+import express from 'express';
+import axios from 'axios';
+import vision from '@google-cloud/vision';
+import dotenv from 'dotenv';
+dotenv.config();
 
 const app = express();
-app.use(bodyParser.json());
+app.use(express.json());
 
-const LINE_TOKEN = process.env.LINE_TOKEN; // เอามาจาก LINE Developer
-const GOOGLE_CREDENTIALS = process.env.GOOGLE_CREDENTIALS; // JSON key ของ Google Vision (stringify แล้วเก็บใน env)
+const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
 
+// สร้าง Vision Client จาก ENV
 const visionClient = new vision.ImageAnnotatorClient({
-  credentials: JSON.parse(GOOGLE_CREDENTIALS)
+  credentials: JSON.parse(process.env.GOOGLE_CREDENTIALS)
 });
 
-// ฟังก์ชัน OCR ด้วย Google Vision API
-async function ocrImage(imageBuffer) {
-  const [result] = await visionClient.textDetection({ image: { content: imageBuffer } });
-  return result.textAnnotations.length ? result.textAnnotations[0].description : "";
+// ดึงรูปจาก LINE
+async function getImageFromLine(messageId) {
+  const res = await axios.get(`https://api-data.line.me/v2/bot/message/${messageId}/content`, {
+    headers: { Authorization: `Bearer ${LINE_TOKEN}` },
+    responseType: 'arraybuffer'
+  });
+  return res.data;
 }
 
-// ฟังก์ชันแปลงข้อความเป็นสรุป
-function parseAndCalculate(text) {
-  const date = new Date().toLocaleDateString("th-TH");
-  const regex = /แผนก\s*(\S+).*?ยอดวันนี้\s*(\d+).*?ยอดที่ต้องการ\s*(\d+)/gs;
-  let match;
-  const lines = [];
+// วิเคราะห์ข้อความจากรูป
+function parseSummary(text) {
+  // แยกบรรทัด
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  let summary = [];
+  let date = '';
 
-  while ((match = regex.exec(text)) !== null) {
-    const dep = match[1];
-    const today = parseInt(match[2], 10);
-    const target = parseInt(match[3], 10);
-    const diff = today - target;
-    lines.push(`แผนก ${dep} ยอดวันนี้ ${today} ยอดที่ต้องการ ${target} เป้า/ขาดทุน ${diff} บาท`);
-  }
+  lines.forEach((line, idx) => {
+    if (line.includes('แผนก')) {
+      const dept = line.replace('แผนก', '').trim();
+      const today = parseInt(lines[idx+1].replace(/\D/g, ''), 10) || 0;
+      const target = parseInt(lines[idx+2].replace(/\D/g, ''), 10) || 0;
+      const diff = today - target;
+      summary.push(`แผนก ${dept} ยอดวันนี้ ${today} ยอดที่ต้องการ ${target} เป้า/ขาดทุน ${diff} บาท`);
+    }
+    if (line.includes('วันที่')) {
+      date = line;
+    }
+  });
 
-  return `สรุปยอดประจำวันที่ ${date}\n` + lines.join("\n");
+  return `สรุปยอดประจำ${date}\n` + summary.join('\n');
 }
 
-// Webhook ของ LINE
-app.post("/webhook", async (req, res) => {
+// ส่งข้อความกลับ LINE
+async function replyMessage(replyToken, text) {
+  await axios.post('https://api.line.me/v2/bot/message/reply', {
+    replyToken,
+    messages: [{ type: 'text', text }]
+  }, {
+    headers: { Authorization: `Bearer ${LINE_TOKEN}` }
+  });
+}
+
+app.post('/webhook', async (req, res) => {
   const events = req.body.events;
-  for (let event of events) {
-    if (event.message?.type === "image") {
+
+  for (const event of events) {
+    if (event.type === 'message' && event.message.type === 'image') {
       try {
-        // ดึงไฟล์รูปจาก LINE
-        const imageUrl = `https://api-data.line.me/v2/bot/message/${event.message.id}/content`;
-        const imgRes = await axios.get(imageUrl, {
-          headers: { Authorization: `Bearer ${LINE_TOKEN}` },
-          responseType: "arraybuffer"
-        });
-
-        // OCR
-        const text = await ocrImage(imgRes.data);
-
-        // สรุปผล
-        const summary = parseAndCalculate(text);
-
-        // ตอบกลับใน LINE
-        await axios.post(
-          "https://api.line.me/v2/bot/message/reply",
-          {
-            replyToken: event.replyToken,
-            messages: [{ type: "text", text: summary }]
-          },
-          { headers: { Authorization: `Bearer ${LINE_TOKEN}` } }
-        );
-
-      } catch (error) {
-        console.error("Error processing image:", error);
+        const imgBuffer = await getImageFromLine(event.message.id);
+        const [result] = await visionClient.textDetection({ image: { content: imgBuffer } });
+        const text = result.fullTextAnnotation ? result.fullTextAnnotation.text : '';
+        const summary = parseSummary(text);
+        await replyMessage(event.replyToken, summary || 'ไม่พบข้อมูลในภาพค่ะ');
+      } catch (err) {
+        console.error(err);
+        await replyMessage(event.replyToken, 'เกิดข้อผิดพลาดในการประมวลผลภาพค่ะ');
       }
+    } else {
+      await replyMessage(event.replyToken, 'กรุณาส่งภาพตารางยอดค่ะ');
     }
   }
-  res.send("OK");
+  res.sendStatus(200);
 });
 
-app.listen(3000, () => console.log("Server running on port 3000"));
+app.listen(process.env.PORT || 3000, () => {
+  console.log(`Server running on port ${process.env.PORT}`);
+});
