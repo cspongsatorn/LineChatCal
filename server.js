@@ -135,7 +135,7 @@ function parseReport9Columns(text) {
 // ฟังก์ชัน format สรุปยอด
 function formatSummaryReport(dataRows, soExternalData, reportDate) {
   const group1 = ['HW', 'DW', 'DH', 'BM']; // เพิ่ม BR กับ GG
-  const group2 = ['PA', 'PB', 'HT', 'PT', 'GD'];
+  const group2 = ['PA', 'PB', 'PT', 'HT', 'GD'];
 
   function formatNumber(num) {
     if (Number.isInteger(num)) return num.toLocaleString('en-US');
@@ -149,7 +149,7 @@ function formatSummaryReport(dataRows, soExternalData, reportDate) {
     const row = dataRows.find(r => r['OMCH3'] === dept);
     if (!row) return;
     const target = soExternalData[dept] || 0;
-    const today = parseFloat(row['POS'].replace(/,/g, '')) || 0;
+    const today = parseFloat(row['POS + S/O'].replace(/,/g, '')) || 0;
     const diff = today - target;
 
     message += `${dept} เป้ารายวัน : ${formatNumber(target)}\n`;
