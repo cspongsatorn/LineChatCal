@@ -2,6 +2,8 @@ import express from 'express';
 import axios from 'axios';
 import vision from '@google-cloud/vision';
 import dotenv from 'dotenv';
+import fs from 'fs/promises';
+
 dotenv.config();
 
 const app = express();
@@ -14,7 +16,53 @@ const visionClient = new vision.ImageAnnotatorClient({
   credentials: JSON.parse(process.env.GOOGLE_CREDENTIALS)
 });
 
-// ===== ฟังก์ชันช่วย =====
+// ไฟล์เก็บข้อมูลเป้ารายวัน
+const dataFile = './soExternalData.json';
+
+// ฟังก์ชันอ่านข้อมูล soExternalData จากไฟล์
+async function readSoExternalData() {
+  try {
+    const content = await fs.readFile(dataFile, 'utf8');
+    return JSON.parse(content);
+  } catch {
+    // ถ้าไฟล์ยังไม่มีหรืออ่านไม่ได้ ให้คืนค่าเป็น object ว่าง
+    return {};
+  }
+}
+
+// ฟังก์ชันเขียนข้อมูล soExternalData ลงไฟล์
+async function writeSoExternalData(newData) {
+  const content = JSON.stringify(newData, null, 2);
+  await fs.writeFile(dataFile, content, 'utf8');
+}
+
+// ฟังก์ชันเช็คคำสั่ง SET และอัพเดตไฟล์ JSON
+async function processSetCommand(text) {
+  if (!text.startsWith('SET ')) return null;
+
+  const args = text.slice(4).trim();
+  const pairs = args.split(/\s+/);
+
+  const currentData = await readSoExternalData();
+
+  let updated = false;
+  pairs.forEach(pair => {
+    const [key, value] = pair.split('=');
+    if (key && value && !isNaN(value)) {
+      currentData[key] = Number(value);
+      updated = true;
+    }
+  });
+
+  if (updated) {
+    await writeSoExternalData(currentData);
+    return `อัพเดตเป้ารายวันสำเร็จ: ${JSON.stringify(currentData)}`;
+  } else {
+    return 'รูปแบบคำสั่ง SET ไม่ถูกต้อง หรือไม่มีข้อมูลให้แก้ไข';
+  }
+}
+
+// ฟังก์ชันช่วย parse ตาราง
 function parseReport9Columns(text) {
   const keys = [
     'OMCH3',
@@ -52,7 +100,7 @@ function parseReport9Columns(text) {
     }
   });
 
-  const knownStores = new Set(['HW', 'DW', 'DH', 'BM', 'PA', 'PB', 'HT', 'PT', 'GD', 'GG']);
+  const knownStores = new Set(['HW', 'DW', 'DH', 'BM', 'PA', 'PB', 'HT', 'PT', 'GD', 'GG', 'BR', 'LT', 'MD', 'OD']);
   let dataRows = [];
   let row = [];
   for (let i = 0; i < fixedCells.length; i++) {
@@ -83,15 +131,19 @@ function parseReport9Columns(text) {
   return dataRows;
 }
 
+
+// ฟังก์ชัน format สรุปยอด
 function formatSummaryReport(dataRows, soExternalData, reportDate) {
-  const group1 = ['HW', 'DW', 'DH', 'BM']; // เพิ่ม GG
+  const group1 = ['HW', 'DW', 'DH', 'BM']; // เพิ่ม BR กับ GG
   const group2 = ['PA', 'PB', 'HT', 'PT', 'GD'];
 
   function formatNumber(num) {
+    if (Number.isInteger(num)) return num.toLocaleString('en-US');
     return num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
 
   let message = '';
+
   message += `แผนก HW/DW/DH/BM ส่งยอดขาย\nประจำวันที่ ${reportDate}\n\n`;
   group1.forEach(dept => {
     const row = dataRows.find(r => r['OMCH3'] === dept);
@@ -104,26 +156,41 @@ function formatSummaryReport(dataRows, soExternalData, reportDate) {
     message += `${dept} ทำได้ : ${formatNumber(today)}\n`;
     message += `Diff : ${diff >= 0 ? '+' : ''}${formatNumber(diff)}\n\n`;
   });
+  message += `ยอดขายอันดับ 1-3 \n`;
+  message += `วันที่ ${reportDate} \n`;
+  message += `1. \n`;
+  message += `2. \n`;
+  message += `3. \n\n`;
 
-  message += `---------------\n\n`;
+  message += `-------------------------------\n\n`;
   message += `แผนก PA/PB/HT/PT/GD ส่งยอดขาย\nประจำวันที่ ${reportDate}\n\n`;
 
   group2.forEach(dept => {
     const row = dataRows.find(r => r['OMCH3'] === dept);
     if (!row) return;
     const target = soExternalData[dept] || 0;
-    const today = parseFloat(row['POS'].replace(/,/g, '')) || 0;
+    const today = parseFloat(row['POS + S/O'].replace(/,/g, '')) || 0;
     const diff = today - target;
 
     message += `${dept} เป้ารายวัน : ${formatNumber(target)}\n`;
     message += `${dept} ทำได้ : ${formatNumber(today)}\n`;
     message += `Diff : ${diff >= 0 ? '+' : ''}${formatNumber(diff)}\n\n`;
   });
+  message += `ยอดขายอันดับ 1-3 PA \n`;
+  message += `วันที่ ${reportDate} \n`;
+  message += `1. \n`;
+  message += `2. \n`;
+  message += `3. \n\n`;
 
+  message += `ยอดขายอันดับ 1-3 PB \n`;
+  message += `วันที่ ${reportDate} \n`;
+  message += `1. \n`;
+  message += `2. \n`;
+  message += `3. \n\n`;
   return message;
 }
 
-// ฟังก์ชันส่งข้อความกลับไปทาง LINE
+// ฟังก์ชันส่งข้อความกลับ LINE
 async function replyMessage(replyToken, text) {
   await axios.post('https://api.line.me/v2/bot/message/reply', {
     replyToken,
@@ -151,41 +218,43 @@ app.post('/webhook', async (req, res) => {
     const events = req.body.events || [];
 
     for (const event of events) {
-      if (event.type === 'message' && event.message.type === 'image') {
-        try {
-          const imgBuffer = await getImageFromLine(event.message.id);
-          const [result] = await visionClient.textDetection({ image: { content: imgBuffer } });
-          const text = result.fullTextAnnotation ? result.fullTextAnnotation.text : '';
-
-          const dataRows = parseReport9Columns(text);
-          if (typeof dataRows === 'string') {
-            await replyMessage(event.replyToken, dataRows);
+      if (event.type === 'message') {
+        if (event.message.type === 'text') {
+          // ตรวจสอบคำสั่ง SET
+          const response = await processSetCommand(event.message.text);
+          if (response !== null) {
+            await replyMessage(event.replyToken, response);
+            continue;
+          } else {
+            await replyMessage(event.replyToken, 'กรุณาส่งคำสั่งที่ถูกต้อง หรือส่งภาพตารางยอดค่ะ');
             continue;
           }
+        } else if (event.message.type === 'image') {
+          try {
+            const imgBuffer = await getImageFromLine(event.message.id);
+            const [result] = await visionClient.textDetection({ image: { content: imgBuffer } });
+            const text = result.fullTextAnnotation ? result.fullTextAnnotation.text : '';
 
-          // ตัวอย่าง S/O จากแหล่งอื่น (ควรดึงจาก DB หรือ API จริง)
-          const soExternalData = {
-            HW: 50000,
-            DW: 30000,
-            DH: 40000,
-            BM: 25000,           
-            PA: 15000,
-            PB: 18000,
-            HT: 17000,
-            PT: 16000,
-            GD: 14000
-          };
+            const dataRows = parseReport9Columns(text);
+            if (typeof dataRows === 'string') {
+              await replyMessage(event.replyToken, dataRows);
+              continue;
+            }
 
-          const reportDate = new Date().toLocaleDateString('th-TH');
-          const summary = formatSummaryReport(dataRows, soExternalData, reportDate);
+            // อ่านข้อมูลเป้ารายวันจากไฟล์ JSON
+            const soExternalData = await readSoExternalData();
 
-          await replyMessage(event.replyToken, summary || 'ไม่พบข้อมูลในภาพค่ะ');
-        } catch (err) {
-          console.error('Error processing image:', err);
-          await replyMessage(event.replyToken, 'เกิดข้อผิดพลาดในการประมวลผลภาพค่ะ');
+            const reportDate = new Date().toLocaleDateString('th-TH');
+            const summary = formatSummaryReport(dataRows, soExternalData, reportDate);
+
+            await replyMessage(event.replyToken, summary || 'ไม่พบข้อมูลในภาพค่ะ');
+          } catch (err) {
+            console.error('Error processing image:', err);
+            await replyMessage(event.replyToken, 'เกิดข้อผิดพลาดในการประมวลผลภาพค่ะ');
+          }
+        } else {
+          await replyMessage(event.replyToken, 'กรุณาส่งภาพตารางยอดค่ะ');
         }
-      } else {
-        await replyMessage(event.replyToken, 'กรุณาส่งภาพตารางยอดค่ะ');
       }
     }
     res.sendStatus(200);
