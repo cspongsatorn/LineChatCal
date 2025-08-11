@@ -9,44 +9,121 @@ app.use(express.json());
 
 const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
 
-// สร้าง Vision Client จาก ENV
+// Google Vision Client
 const visionClient = new vision.ImageAnnotatorClient({
   credentials: JSON.parse(process.env.GOOGLE_CREDENTIALS)
 });
 
-// ดึงรูปจาก LINE
-async function getImageFromLine(messageId) {
-  const res = await axios.get(`https://api-data.line.me/v2/bot/message/${messageId}/content`, {
-    headers: { Authorization: `Bearer ${LINE_TOKEN}` },
-    responseType: 'arraybuffer'
+// ===== ฟังก์ชันช่วย =====
+function parseReport9Columns(text) {
+  const keys = [
+    'OMCH3',
+    'Rank',
+    'POS + S/O',
+    'POS',
+    'S/O',
+    'Basket POS',
+    'Basket S/O',
+    'POS2',
+    'S/O2'
+  ];
+
+  let rawCells = text
+    .split(/\s+/)
+    .map(c => c.trim())
+    .filter(c => c !== '');
+
+  const headerIndex = rawCells.indexOf('OMCH3');
+  if (headerIndex === -1) return 'ไม่พบหัวตาราง OMCH3';
+
+  let dataCells = rawCells.slice(headerIndex + keys.length);
+
+  const startIndex = dataCells.indexOf('BR');
+  if (startIndex === -1) return 'ไม่พบข้อมูลเริ่มต้น BR';
+  dataCells = dataCells.slice(startIndex);
+
+  let fixedCells = [];
+  dataCells.forEach(cell => {
+    if (cell.includes(' ')) {
+      const parts = cell.split(' ').filter(c => c !== '');
+      fixedCells.push(...parts);
+    } else {
+      fixedCells.push(cell);
+    }
   });
-  return res.data;
+
+  const knownStores = new Set(['HW', 'DW', 'DH', 'BM', 'PA', 'PB', 'HT', 'PT', 'GD', 'GG']);
+  let dataRows = [];
+  let row = [];
+  for (let i = 0; i < fixedCells.length; i++) {
+    const cell = fixedCells[i];
+    if (knownStores.has(cell)) {
+      if (row.length > 0) {
+        while (row.length < keys.length) row.push('0');
+        let obj = {};
+        keys.forEach((k, idx) => {
+          obj[k] = row[idx];
+        });
+        dataRows.push(obj);
+        row = [];
+      }
+      row.push(cell);
+    } else {
+      row.push(cell);
+    }
+  }
+  if (row.length > 0) {
+    while (row.length < keys.length) row.push('0');
+    let obj = {};
+    keys.forEach((k, idx) => {
+      obj[k] = row[idx];
+    });
+    dataRows.push(obj);
+  }
+  return dataRows;
 }
 
-// วิเคราะห์ข้อความจากรูป
-function parseSummary(text) {
-  // แยกบรรทัด
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-  let summary = [];
-  let date = '';
+function formatSummaryReport(dataRows, soExternalData, reportDate) {
+  const group1 = ['HW', 'DW', 'DH', 'BM']; // เพิ่ม GG
+  const group2 = ['PA', 'PB', 'HT', 'PT', 'GD'];
 
-  lines.forEach((line, idx) => {
-    if (line.includes('แผนก')) {
-      const dept = line.replace('แผนก', '').trim();
-      const today = parseInt(lines[idx+1].replace(/\D/g, ''), 10) || 0;
-      const target = parseInt(lines[idx+2].replace(/\D/g, ''), 10) || 0;
-      const diff = today - target;
-      summary.push(`แผนก ${dept} ยอดวันนี้ ${today} ยอดที่ต้องการ ${target} เป้า/ขาดทุน ${diff} บาท`);
-    }
-    if (line.includes('วันที่')) {
-      date = line;
-    }
+  function formatNumber(num) {
+    return num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  let message = '';
+  message += `แผนก HW/DW/DH/BM ส่งยอดขาย\nประจำวันที่ ${reportDate}\n\n`;
+  group1.forEach(dept => {
+    const row = dataRows.find(r => r['OMCH3'] === dept);
+    if (!row) return;
+    const target = soExternalData[dept] || 0;
+    const today = parseFloat(row['POS'].replace(/,/g, '')) || 0;
+    const diff = today - target;
+
+    message += `${dept} เป้ารายวัน : ${formatNumber(target)}\n`;
+    message += `${dept} ทำได้ : ${formatNumber(today)}\n`;
+    message += `Diff : ${diff >= 0 ? '+' : ''}${formatNumber(diff)}\n\n`;
   });
 
-  return `สรุปยอดประจำ${date}\n` + summary.join('\n');
+  message += `---------------\n\n`;
+  message += `แผนก PA/PB/HT/PT/GD ส่งยอดขาย\nประจำวันที่ ${reportDate}\n\n`;
+
+  group2.forEach(dept => {
+    const row = dataRows.find(r => r['OMCH3'] === dept);
+    if (!row) return;
+    const target = soExternalData[dept] || 0;
+    const today = parseFloat(row['POS'].replace(/,/g, '')) || 0;
+    const diff = today - target;
+
+    message += `${dept} เป้ารายวัน : ${formatNumber(target)}\n`;
+    message += `${dept} ทำได้ : ${formatNumber(today)}\n`;
+    message += `Diff : ${diff >= 0 ? '+' : ''}${formatNumber(diff)}\n\n`;
+  });
+
+  return message;
 }
 
-// ส่งข้อความกลับ LINE
+// ฟังก์ชันส่งข้อความกลับไปทาง LINE
 async function replyMessage(replyToken, text) {
   await axios.post('https://api.line.me/v2/bot/message/reply', {
     replyToken,
@@ -56,28 +133,69 @@ async function replyMessage(replyToken, text) {
   });
 }
 
-app.post('/webhook', async (req, res) => {
-  const events = req.body.events;
-
-  for (const event of events) {
-    if (event.type === 'message' && event.message.type === 'image') {
-      try {
-        const imgBuffer = await getImageFromLine(event.message.id);
-        const [result] = await visionClient.textDetection({ image: { content: imgBuffer } });
-        const text = result.fullTextAnnotation ? result.fullTextAnnotation.text : '';
-        const summary = parseSummary(text);
-        await replyMessage(event.replyToken, summary || 'ไม่พบข้อมูลในภาพค่ะ');
-      } catch (err) {
-        console.error(err);
-        await replyMessage(event.replyToken, 'เกิดข้อผิดพลาดในการประมวลผลภาพค่ะ');
-      }
-    } else {
-      await replyMessage(event.replyToken, 'กรุณาส่งภาพตารางยอดค่ะ');
+// ฟังก์ชันดึงภาพจาก LINE
+async function getImageFromLine(messageId) {
+  const res = await axios.get(
+    `https://api-data.line.me/v2/bot/message/${messageId}/content`,
+    {
+      headers: { Authorization: `Bearer ${LINE_TOKEN}` },
+      responseType: 'arraybuffer'
     }
+  );
+  return res.data;
+}
+
+// Webhook
+app.post('/webhook', async (req, res) => {
+  try {
+    const events = req.body.events || [];
+
+    for (const event of events) {
+      if (event.type === 'message' && event.message.type === 'image') {
+        try {
+          const imgBuffer = await getImageFromLine(event.message.id);
+          const [result] = await visionClient.textDetection({ image: { content: imgBuffer } });
+          const text = result.fullTextAnnotation ? result.fullTextAnnotation.text : '';
+
+          const dataRows = parseReport9Columns(text);
+          if (typeof dataRows === 'string') {
+            await replyMessage(event.replyToken, dataRows);
+            continue;
+          }
+
+          // ตัวอย่าง S/O จากแหล่งอื่น (ควรดึงจาก DB หรือ API จริง)
+          const soExternalData = {
+            HW: 50000,
+            DW: 30000,
+            DH: 40000,
+            BM: 25000,           
+            PA: 15000,
+            PB: 18000,
+            HT: 17000,
+            PT: 16000,
+            GD: 14000
+          };
+
+          const reportDate = new Date().toLocaleDateString('th-TH');
+          const summary = formatSummaryReport(dataRows, soExternalData, reportDate);
+
+          await replyMessage(event.replyToken, summary || 'ไม่พบข้อมูลในภาพค่ะ');
+        } catch (err) {
+          console.error('Error processing image:', err);
+          await replyMessage(event.replyToken, 'เกิดข้อผิดพลาดในการประมวลผลภาพค่ะ');
+        }
+      } else {
+        await replyMessage(event.replyToken, 'กรุณาส่งภาพตารางยอดค่ะ');
+      }
+    }
+    res.sendStatus(200);
+  } catch (err) {
+    console.error('Webhook error:', err);
+    res.sendStatus(200);
   }
-  res.sendStatus(200);
 });
 
-app.listen(process.env.PORT || 3000, () => {
-  console.log(`Server running on port ${process.env.PORT}`);
+const PORT = 10000 || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
