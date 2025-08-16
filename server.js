@@ -81,6 +81,8 @@ function parseReport9Columns(text) {
     .map(c => c.trim())
     .filter(c => c !== '');
 
+    console.log("OCR Lines:", rawCells); 
+
   const headerIndex = rawCells.indexOf('OMCH3');
   if (headerIndex === -1) return 'ไม่พบหัวตาราง OMCH3';
 
