@@ -83,7 +83,7 @@ function parseReport9Columns(text) {
 
     console.log("OCR Lines:", rawCells); 
 
-  const headerIndex = rawCells.indexOf('OMCH3');
+  const headerIndex = rawCells.findIndex(c => c.toUpperCase().includes("OMCH3") || c.toUpperCase().includes("MCH3"));
   if (headerIndex === -1) return 'ไม่พบหัวตาราง OMCH3';
 
   let dataCells = rawCells.slice(headerIndex + keys.length);
