@@ -2,7 +2,8 @@ import express from 'express';
 import axios from 'axios';
 import vision from '@google-cloud/vision';
 import dotenv from 'dotenv';
-import Database from 'better-sqlite3';
+import sqlite3 from 'sqlite3';
+import { open } from 'sqlite';
 
 dotenv.config();
 
@@ -11,72 +12,47 @@ app.use(express.json());
 
 const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
 
-// ================== DB SECTION ==================
-const db = new Database('./soExternalData.db');
-
-// สร้างตารางถ้ายังไม่มี
-db.prepare(`
-  CREATE TABLE IF NOT EXISTS so_external_data (
-    dept TEXT PRIMARY KEY,
-    target REAL
-  )
-`).run();
-
-// อ่านข้อมูลจากฐานข้อมูล
-async function readSoExternalData() {
-  const rows = db.prepare("SELECT dept, target FROM so_external_data").all();
-  const result = {};
-  rows.forEach(r => {
-    result[r.dept] = r.target;
-  });
-  return result;
-}
-
-// เขียน/อัพเดตข้อมูล
-async function writeSoExternalData(newData) {
-  const stmt = db.prepare(`
-    INSERT INTO so_external_data (dept, target)
-    VALUES (@dept, @target)
-    ON CONFLICT(dept) DO UPDATE SET target = excluded.target
-  `);
-  const insertMany = db.transaction((data) => {
-    for (const [dept, target] of Object.entries(data)) {
-      stmt.run({ dept, target });
-    }
-  });
-  insertMany(newData);
-}
-
-// ฟังก์ชันประมวลผลคำสั่ง SET
-async function processSetCommand(text) {
-  if (!text.startsWith('SET ')) return null;
-
-  const args = text.slice(4).trim();
-  const pairs = args.split(/\s+/);
-
-  let updated = {};
-  pairs.forEach(pair => {
-    const [key, value] = pair.split('=');
-    if (key && value && !isNaN(value)) {
-      updated[key] = Number(value);
-    }
-  });
-
-  if (Object.keys(updated).length > 0) {
-    await writeSoExternalData(updated);
-    const latest = await readSoExternalData();
-    return `อัพเดตเป้ารายวันสำเร็จ: ${JSON.stringify(latest)}`;
-  } else {
-    return 'รูปแบบคำสั่ง SET ไม่ถูกต้อง หรือไม่มีข้อมูลให้แก้ไข';
-  }
-}
-// =================================================
-
-
 // Google Vision Client
 const visionClient = new vision.ImageAnnotatorClient({
   credentials: JSON.parse(process.env.GOOGLE_CREDENTIALS)
 });
+
+// === SQLite Setup ===
+let db;
+(async () => {
+  db = await open({
+    filename: './soExternalData.db',
+    driver: sqlite3.Database
+  });
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS so_external_data (
+      dept TEXT PRIMARY KEY,
+      target REAL
+    )
+  `);
+})();
+
+// อ่านค่า target จาก DB
+async function readSoExternalData() {
+  const rows = await db.all("SELECT dept, target FROM so_external_data");
+  const result = {};
+  rows.forEach(r => result[r.dept] = r.target);
+  return result;
+}
+
+// เขียนค่า target ลง DB
+async function writeSoExternalData(newData) {
+  const stmt = await db.prepare(`
+    INSERT INTO so_external_data (dept, target)
+    VALUES (?, ?)
+    ON CONFLICT(dept) DO UPDATE SET target = excluded.target
+  `);
+  for (const [dept, target] of Object.entries(newData)) {
+    await stmt.run(dept, target);
+  }
+  await stmt.finalize();
+}
 
 // ฟังก์ชันดึงภาพจาก LINE
 async function getImageFromLine(messageId) {
@@ -101,6 +77,9 @@ async function parseSummary(text) {
   if (startIndex === -1) return 'ไม่พบข้อมูลตาราง';
   lines = lines.slice(startIndex + 1);
 
+  const group1 = ['HW', 'DW', 'DH', 'BM'];
+  const group2 = ['PA', 'PB', 'HT', 'PT', 'GD'];
+
   let data = [];
   for (let i = 0; i < lines.length; i++) {
     let dept = lines[i];
@@ -110,20 +89,26 @@ async function parseSummary(text) {
     }
   }
 
-  const fmt = n => n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
-  // ดึงเป้าจาก DB
+  // โหลด target จาก DB
   const targets = await readSoExternalData();
 
-  let message = `📊 สรุปยอดขายประจำวันที่ ${new Date().toLocaleDateString('th-TH')}\n`;
-  for (const row of data) {
-    let target = targets[row.dept] || 0;
-    let diff = row.posSo - target;
-    let diffSign = diff >= 0 ? '+' : '';
-    message += `\n${row.dept} เป้ารายวัน : ${fmt(target)}\n`;
-    message += `${row.dept} ทำได้ : ${fmt(row.posSo)}\n`;
-    message += `Diff : ${diffSign}${fmt(diff)}\n`;
+  const fmt = n => n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  function summarizeGroup(name, depts) {
+    let rows = data.filter(d => depts.includes(d.dept));
+    let sum = rows.reduce((acc, r) => acc + r.posSo, 0);
+    let msg = `\n📌 กลุ่ม ${name}\n`;
+    rows.forEach(r => {
+      let target = targets[r.dept] || 0;
+      msg += `${r.dept} : ${fmt(r.posSo)} / ${fmt(target)}\n`;
+    });
+    msg += `รวมกลุ่ม ${name} : ${fmt(sum)} บาท\n`;
+    return msg;
   }
+
+  let message = '📊 สรุปยอดขาย\n';
+  message += summarizeGroup(1, group1);
+  message += summarizeGroup(2, group2);
 
   return message;
 }
@@ -156,20 +141,33 @@ app.post('/webhook', async (req, res) => {
             console.error('Error processing image:', err);
             await replyMessage(event.replyToken, 'เกิดข้อผิดพลาดในการประมวลผลภาพค่ะ');
           }
-        } else if (event.message.type === 'text') {
-          const response = await processSetCommand(event.message.text);
-          if (response) {
-            await replyMessage(event.replyToken, response);
-          } else {
-            await replyMessage(event.replyToken, 'กรุณาส่งภาพตารางยอด หรือคำสั่ง SET ค่ะ');
+        } else if (event.message.type === 'text' && event.message.text.startsWith('set ')) {
+          try {
+            // ตัวอย่าง: "set HW 1000"
+            const parts = event.message.text.split(' ');
+            if (parts.length === 3) {
+              const dept = parts[1].toUpperCase();
+              const target = parseFloat(parts[2]);
+              if (!isNaN(target)) {
+                await writeSoExternalData({ [dept]: target });
+                await replyMessage(event.replyToken, `✅ ตั้งค่าเป้า ${dept} = ${target}`);
+              } else {
+                await replyMessage(event.replyToken, 'รูปแบบไม่ถูกต้อง เช่น set HW 1000');
+              }
+            }
+          } catch (err) {
+            console.error('Error setting target:', err);
+            await replyMessage(event.replyToken, 'เกิดข้อผิดพลาดในการตั้งค่าเป้าหมาย');
           }
+        } else {
+          await replyMessage(event.replyToken, 'กรุณาส่งภาพตารางยอด หรือพิมพ์ set DEPT ค่า');
         }
       }
     }
     res.sendStatus(200);
   } catch (err) {
     console.error('Webhook error:', err);
-    res.sendStatus(200);
+    res.sendStatus(200); // ตอบ 200 เพื่อไม่ให้ LINE retry
   }
 });
 
