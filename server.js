@@ -3,7 +3,6 @@ import axios from 'axios';
 import vision from '@google-cloud/vision';
 import dotenv from 'dotenv';
 import sqlite3 from 'sqlite3';
-import { open } from 'sqlite';
 
 dotenv.config();
 
@@ -17,44 +16,39 @@ const visionClient = new vision.ImageAnnotatorClient({
   credentials: JSON.parse(process.env.GOOGLE_CREDENTIALS)
 });
 
-// === SQLite Setup ===
-let db;
-(async () => {
-  db = await open({
-    filename: './soExternalData.db',
-    driver: sqlite3.Database
-  });
-
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS so_external_data (
-      dept TEXT PRIMARY KEY,
-      target REAL
-    )
-  `);
-})();
-
-// อ่านค่า target จาก DB
-async function readSoExternalData() {
-  const rows = await db.all("SELECT dept, target FROM so_external_data");
-  const result = {};
-  rows.forEach(r => result[r.dept] = r.target);
-  return result;
-}
-
-// เขียนค่า target ลง DB
-async function writeSoExternalData(newData) {
-  const stmt = await db.prepare(`
-    INSERT INTO so_external_data (dept, target)
-    VALUES (?, ?)
-    ON CONFLICT(dept) DO UPDATE SET target = excluded.target
-  `);
-  for (const [dept, target] of Object.entries(newData)) {
-    await stmt.run(dept, target);
+// ====================== DATABASE ======================
+const db = new sqlite3.Database('./sales.db', (err) => {
+  if (err) {
+    console.error('❌ Error opening database:', err);
+  } else {
+    console.log('✅ Connected to SQLite');
+    db.run(`
+      CREATE TABLE IF NOT EXISTS sales (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        dept TEXT,
+        target REAL,
+        actual REAL,
+        date TEXT
+      )
+    `);
   }
-  await stmt.finalize();
+});
+
+// ฟังก์ชันบันทึกลง DB
+function saveSales(dept, target, actual, date) {
+  return new Promise((resolve, reject) => {
+    db.run(
+      'INSERT INTO sales (dept, target, actual, date) VALUES (?, ?, ?, ?)',
+      [dept, target, actual, date],
+      function (err) {
+        if (err) reject(err);
+        else resolve(this.lastID);
+      }
+    );
+  });
 }
 
-// ฟังก์ชันดึงภาพจาก LINE
+// ====================== LINE IMAGE ======================
 async function getImageFromLine(messageId) {
   const res = await axios.get(
     `https://api-data.line.me/v2/bot/message/${messageId}/content`,
@@ -66,8 +60,8 @@ async function getImageFromLine(messageId) {
   return res.data;
 }
 
-// ฟังก์ชันประมวลผลข้อความจาก OCR → สรุปยอด
-async function parseSummary(text) {
+// ====================== PARSE OCR ======================
+function parseSummary(text) {
   let lines = text
     .split('\n')
     .map(l => l.replace(/\s+/g, ' ').trim())
@@ -81,6 +75,7 @@ async function parseSummary(text) {
   const group2 = ['PA', 'PB', 'HT', 'PT', 'GD'];
 
   let data = [];
+
   for (let i = 0; i < lines.length; i++) {
     let dept = lines[i];
     if (/^[A-Z]{2}$/.test(dept)) {
@@ -89,9 +84,6 @@ async function parseSummary(text) {
     }
   }
 
-  // โหลด target จาก DB
-  const targets = await readSoExternalData();
-
   const fmt = n => n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   function summarizeGroup(name, depts) {
@@ -99,8 +91,7 @@ async function parseSummary(text) {
     let sum = rows.reduce((acc, r) => acc + r.posSo, 0);
     let msg = `\n📌 กลุ่ม ${name}\n`;
     rows.forEach(r => {
-      let target = targets[r.dept] || 0;
-      msg += `${r.dept} : ${fmt(r.posSo)} / ${fmt(target)}\n`;
+      msg += `${r.dept} : ${fmt(r.posSo)}\n`;
     });
     msg += `รวมกลุ่ม ${name} : ${fmt(sum)} บาท\n`;
     return msg;
@@ -110,10 +101,16 @@ async function parseSummary(text) {
   message += summarizeGroup(1, group1);
   message += summarizeGroup(2, group2);
 
+  // 📌 บันทึกลง DB ด้วยวันที่วันนี้
+  const today = new Date().toISOString().split('T')[0];
+  data.forEach(d => {
+    saveSales(d.dept, 0, d.posSo, today).catch(err => console.error('DB Save error:', err));
+  });
+
   return message;
 }
 
-// ฟังก์ชันส่งข้อความกลับไปทาง LINE
+// ====================== REPLY LINE ======================
 async function replyMessage(replyToken, text) {
   await axios.post('https://api.line.me/v2/bot/message/reply', {
     replyToken,
@@ -123,55 +120,35 @@ async function replyMessage(replyToken, text) {
   });
 }
 
-// Webhook
+// ====================== WEBHOOK ======================
 app.post('/webhook', async (req, res) => {
   try {
     const events = req.body.events || [];
 
     for (const event of events) {
-      if (event.type === 'message') {
-        if (event.message.type === 'image') {
-          try {
-            const imgBuffer = await getImageFromLine(event.message.id);
-            const [result] = await visionClient.textDetection({ image: { content: imgBuffer } });
-            const text = result.fullTextAnnotation ? result.fullTextAnnotation.text : '';
-            const summary = await parseSummary(text);
-            await replyMessage(event.replyToken, summary || 'ไม่พบข้อมูลในภาพค่ะ');
-          } catch (err) {
-            console.error('Error processing image:', err);
-            await replyMessage(event.replyToken, 'เกิดข้อผิดพลาดในการประมวลผลภาพค่ะ');
-          }
-        } else if (event.message.type === 'text' && event.message.text.startsWith('set ')) {
-          try {
-            // ตัวอย่าง: "set HW 1000"
-            const parts = event.message.text.split(' ');
-            if (parts.length === 3) {
-              const dept = parts[1].toUpperCase();
-              const target = parseFloat(parts[2]);
-              if (!isNaN(target)) {
-                await writeSoExternalData({ [dept]: target });
-                await replyMessage(event.replyToken, `✅ ตั้งค่าเป้า ${dept} = ${target}`);
-              } else {
-                await replyMessage(event.replyToken, 'รูปแบบไม่ถูกต้อง เช่น set HW 1000');
-              }
-            }
-          } catch (err) {
-            console.error('Error setting target:', err);
-            await replyMessage(event.replyToken, 'เกิดข้อผิดพลาดในการตั้งค่าเป้าหมาย');
-          }
-        } else {
-          await replyMessage(event.replyToken, 'กรุณาส่งภาพตารางยอด หรือพิมพ์ set DEPT ค่า');
+      if (event.type === 'message' && event.message.type === 'image') {
+        try {
+          const imgBuffer = await getImageFromLine(event.message.id);
+          const [result] = await visionClient.textDetection({ image: { content: imgBuffer } });
+          const text = result.fullTextAnnotation ? result.fullTextAnnotation.text : '';
+          const summary = parseSummary(text);
+          await replyMessage(event.replyToken, summary || 'ไม่พบข้อมูลในภาพค่ะ');
+        } catch (err) {
+          console.error('Error processing image:', err);
+          await replyMessage(event.replyToken, 'เกิดข้อผิดพลาดในการประมวลผลภาพค่ะ');
         }
+      } else {
+        await replyMessage(event.replyToken, 'กรุณาส่งภาพตารางยอดค่ะ');
       }
     }
     res.sendStatus(200);
   } catch (err) {
     console.error('Webhook error:', err);
-    res.sendStatus(200); // ตอบ 200 เพื่อไม่ให้ LINE retry
+    res.sendStatus(200);
   }
 });
 
 const PORT = 10000 || 3000;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
 });
