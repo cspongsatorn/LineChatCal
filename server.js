@@ -64,15 +64,22 @@ async function processSetCommand(text) {
 
 // ฟังก์ชันช่วย parse ตาราง
 
-function parseReport3Columns(lines) {
+function parseReport3Columns(text) {
+
+    let rawCells = text
+    .split(/\s+/)
+    .map(c => c.trim())
+    .filter(c => c !== '');
+    console.log("OCR Lines:", rawCells); 
+
   const dataRows = [];
   const deptCodes = ["VS","MA","FC","LT","PB","BR","HW","DW","DH","BM","PA","PT","HT","GD"];
 
-  for (let i = 0; i < lines.length; i++) {
-    if (deptCodes.includes(lines[i])) {
-      const dept = lines[i];
-      const rank = lines[i + 1] || "";
-      const pos = lines[i + 2] || "0";   // ใช้ค่าหลัง Rank แทน
+  for (let i = 0; i < text.length; i++) {
+    if (deptCodes.includes(text[i])) {
+      const dept = text[i];
+      const rank = text[i + 1] || "";
+      const pos = text[i + 2] || "0";   // ใช้ค่าหลัง Rank แทน
       dataRows.push({
         OMCH3: dept,
         Rank: rank,
