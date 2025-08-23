@@ -63,33 +63,76 @@ async function processSetCommand(text) {
 }
 
 // ฟังก์ชันช่วย parse ตาราง
+function parseReport9Columns(text) {
+  const keys = [
+    'OMCH3',
+    'Rank',
+    'POS + S/O',
+    'POS',
+    'S/O',
+    'Basket POS',
+    'Basket S/O',
+    'POS2',
+    'S/O2'
+  ];
 
-function parseReport3Columns(text) {
-
-    let rawCells = text
+  let rawCells = text
     .split(/\s+/)
     .map(c => c.trim())
     .filter(c => c !== '');
+
     console.log("OCR Lines:", rawCells); 
 
-  const dataRows = [];
-  const deptCodes = ["VS","MA","FC","LT","PB","BR","HW","DW","DH","BM","PA","PT","HT","GD"];
+  const headerIndex = rawCells.findIndex(c => c.toUpperCase().includes("OMCH3") || c.toUpperCase().includes("MCH3"));
+  if (headerIndex === -1) return 'ไม่พบหัวตาราง OMCH3';
 
-  for (let i = 0; i < text.length; i++) {
-    if (deptCodes.includes(text[i])) {
-      const dept = text[i];
-      const rank = text[i + 1] || "";
-      const pos = text[i + 2] || "0";   // ใช้ค่าหลัง Rank แทน
-      dataRows.push({
-        OMCH3: dept,
-        Rank: rank,
-        "POS + S/O": pos
-      });
+  let dataCells = rawCells.slice(headerIndex + keys.length);
+
+  const startIndex = dataCells.indexOf('BR');
+  if (startIndex === -1) return 'ไม่พบข้อมูลเริ่มต้น BR';
+  dataCells = dataCells.slice(startIndex);
+
+  let fixedCells = [];
+  dataCells.forEach(cell => {
+    if (cell.includes(' ')) {
+      const parts = cell.split(' ').filter(c => c !== '');
+      fixedCells.push(...parts);
+    } else {
+      fixedCells.push(cell);
+    }
+  });
+
+  const knownStores = new Set(['HW', 'DW', 'DH', 'BM', 'PA', 'PB', 'HT', 'PT', 'GD', 'GG', 'BR', 'LT', 'MD', 'OD']);
+  let dataRows = [];
+  let row = [];
+  for (let i = 0; i < fixedCells.length; i++) {
+    const cell = fixedCells[i];
+    if (knownStores.has(cell)) {
+      if (row.length > 0) {
+        while (row.length < keys.length) row.push('0');
+        let obj = {};
+        keys.forEach((k, idx) => {
+          obj[k] = row[idx];
+        });
+        dataRows.push(obj);
+        row = [];
+      }
+      row.push(cell);
+    } else {
+      row.push(cell);
     }
   }
-
+  if (row.length > 0) {
+    while (row.length < keys.length) row.push('0');
+    let obj = {};
+    keys.forEach((k, idx) => {
+      obj[k] = row[idx];
+    });
+    dataRows.push(obj);
+  }
   return dataRows;
 }
+
 
 // ฟังก์ชัน format สรุปยอด
 function formatSummaryReport(dataRows, soExternalData, reportDate) {
@@ -194,7 +237,7 @@ app.post('/webhook', async (req, res) => {
             const [result] = await visionClient.textDetection({ image: { content: imgBuffer } });
             const text = result.fullTextAnnotation ? result.fullTextAnnotation.text : '';
 
-            const dataRows = parseReport3Columns(text);
+            const dataRows = parseReport9Columns(text);
             if (typeof dataRows === 'string') {
               await replyMessage(event.replyToken, dataRows);
               continue;
