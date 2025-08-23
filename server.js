@@ -63,54 +63,47 @@ async function processSetCommand(text) {
 }
 
 // ฟังก์ชันช่วย parse ตาราง
-// ฟังก์ชันช่วย parse ตารางให้เหลือ 3 คอลัมน์
+
 function parseReport3Columns(text) {
-  const keys = ["MCH3", "Rank", "POS + S/O"];
+  const keys = [
+    'OMCH3',
+    'Rank',
+    'POS + S/O'
+  ];
 
   let rawCells = text
     .split(/\s+/)
     .map(c => c.trim())
-    .filter(c => c !== "");
+    .filter(c => c !== '');
 
-  console.log("OCR Cells:", rawCells);
+  console.log("OCR Lines:", rawCells);
 
-  // หาตำแหน่งเริ่มตาราง (เจอ "MCH3")
   const headerIndex = rawCells.findIndex(
-    c => c.toUpperCase().includes("MCH3")
+    c => c.toUpperCase().includes("OMCH3") || c.toUpperCase().includes("MCH3")
   );
-  if (headerIndex === -1) return "ไม่พบหัวตาราง MCH3";
+  if (headerIndex === -1) return 'ไม่พบหัวตาราง OMCH3';
 
-  // ตัดหัวออก เหลือเฉพาะข้อมูลหลังจาก header
   let dataCells = rawCells.slice(headerIndex + keys.length);
 
-  // เซ็ตของชื่อร้านที่รู้จัก
-  const knownStores = new Set([
-    "VS", "MA", "FC", "HW", "DW", "DH", "BM", "PA", "PB", 
-    "HT", "PT", "GD", "GG", "BR", "LT", "MD", "OD"
-  ]);
+  // ✅ แก้ไขให้รองรับหลาย code เป็นจุดเริ่มต้น
+  const knownStores = [
+    "VS","MA","FC","LT","PB","BR","HO","SA","KC","BD",
+    "FD","PA","FT","HW","ET","DH","GD","HT","DW","OL",
+    "PT","SR","AU","BC","BM","IT","PE","GG","MD","OD"
+  ];
 
+  const startIndex = dataCells.findIndex(c => knownStores.includes(c));
+  if (startIndex === -1) return 'ไม่พบข้อมูลเริ่มต้นของสาขา/แผนก';
+  dataCells = dataCells.slice(startIndex);
+
+  // แปลงข้อมูลเป็น row
   let dataRows = [];
   let row = [];
-
   for (let i = 0; i < dataCells.length; i++) {
     const cell = dataCells[i];
-
-    if (knownStores.has(cell)) {
-      // ถ้ามี row เดิม → push ก่อน
+    if (knownStores.includes(cell)) {
       if (row.length > 0) {
-        if (row.length === keys.length) {
-          let obj = {};
-          keys.forEach((k, idx) => {
-            obj[k] = row[idx];
-          });
-          dataRows.push(obj);
-        }
-        row = [];
-      }
-      row.push(cell); // เริ่มร้านใหม่
-    } else {
-      row.push(cell);
-      if (row.length === keys.length) {
+        while (row.length < keys.length) row.push('0');
         let obj = {};
         keys.forEach((k, idx) => {
           obj[k] = row[idx];
@@ -118,13 +111,22 @@ function parseReport3Columns(text) {
         dataRows.push(obj);
         row = [];
       }
+      row.push(cell);
+    } else {
+      row.push(cell);
     }
+  }
+  if (row.length > 0) {
+    while (row.length < keys.length) row.push('0');
+    let obj = {};
+    keys.forEach((k, idx) => {
+      obj[k] = row[idx];
+    });
+    dataRows.push(obj);
   }
 
   return dataRows;
 }
-
-
 
 // ฟังก์ชัน format สรุปยอด
 function formatSummaryReport(dataRows, soExternalData, reportDate) {
