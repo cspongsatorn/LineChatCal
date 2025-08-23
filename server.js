@@ -64,65 +64,21 @@ async function processSetCommand(text) {
 
 // ฟังก์ชันช่วย parse ตาราง
 
-function parseReport3Columns(text) {
-  const keys = [
-    'OMCH3',
-    'Rank',
-    'POS + S/O'
-  ];
+function parseReport3Columns(lines) {
+  const dataRows = [];
+  const deptCodes = ["VS","MA","FC","LT","PB","BR","HW","DW","DH","BM","PA","PT","HT","GD"];
 
-  let rawCells = text
-    .split(/\s+/)
-    .map(c => c.trim())
-    .filter(c => c !== '');
-
-  console.log("OCR Lines:", rawCells);
-
-  const headerIndex = rawCells.findIndex(
-    c => c.toUpperCase().includes("OMCH3") || c.toUpperCase().includes("MCH3")
-  );
-  if (headerIndex === -1) return 'ไม่พบหัวตาราง OMCH3';
-
-  let dataCells = rawCells.slice(headerIndex + keys.length);
-
-  // ✅ แก้ไขให้รองรับหลาย code เป็นจุดเริ่มต้น
-  const knownStores = [
-    "VS","MA","FC","LT","PB","BR","HO","SA","KC","BD",
-    "FD","PA","FT","HW","ET","DH","GD","HT","DW","OL",
-    "PT","SR","AU","BC","BM","IT","PE","GG","MD","OD"
-  ];
-
-  const startIndex = dataCells.findIndex(c => knownStores.includes(c));
-  if (startIndex === -1) return 'ไม่พบข้อมูลเริ่มต้นของสาขา/แผนก';
-  dataCells = dataCells.slice(startIndex);
-
-  // แปลงข้อมูลเป็น row
-  let dataRows = [];
-  let row = [];
-  for (let i = 0; i < dataCells.length; i++) {
-    const cell = dataCells[i];
-    if (knownStores.includes(cell)) {
-      if (row.length > 0) {
-        while (row.length < keys.length) row.push('0');
-        let obj = {};
-        keys.forEach((k, idx) => {
-          obj[k] = row[idx];
-        });
-        dataRows.push(obj);
-        row = [];
-      }
-      row.push(cell);
-    } else {
-      row.push(cell);
+  for (let i = 0; i < lines.length; i++) {
+    if (deptCodes.includes(lines[i])) {
+      const dept = lines[i];
+      const rank = lines[i + 1] || "";
+      const pos = lines[i + 2] || "0";   // ใช้ค่าหลัง Rank แทน
+      dataRows.push({
+        OMCH3: dept,
+        Rank: rank,
+        "POS + S/O": pos
+      });
     }
-  }
-  if (row.length > 0) {
-    while (row.length < keys.length) row.push('0');
-    let obj = {};
-    keys.forEach((k, idx) => {
-      obj[k] = row[idx];
-    });
-    dataRows.push(obj);
   }
 
   return dataRows;
