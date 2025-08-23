@@ -62,73 +62,36 @@ async function processSetCommand(text) {
   }
 }
 
-// ฟังก์ชันช่วย parse ตาราง
-function parseReport9Columns(text) {
-  const keys = [
-    'OMCH3',
-    'Rank',
-    'POS + S/O',
-    'POS',
-    'S/O',
-    'Basket POS',
-    'Basket S/O',
-    'POS2',
-    'S/O2'
-  ];
+
+// parser แบบง่ายจาก OCR
+function parseSimpleTable(text) {
+  const knownStores = new Set([
+    "VS","MA","FC","LT","PB","BR","HO","SA","KC","BD",
+    "FD","PA","FT","HW","ET","DH","GD","HT","DW","OL",
+    "PT","SR","AU","BC","BM","IT","PE","GG","MD","OD"
+  ]);
 
   let rawCells = text
     .split(/\s+/)
-    .map(c => c.trim())
-    .filter(c => c !== '');
+    .map(c => c.trim().replace(/[,]/g, "")) // ลบ comma
+    .filter(c => c !== "");
 
-    console.log("OCR Lines:", rawCells); 
-
-  const headerIndex = rawCells.findIndex(c => c.toUpperCase().includes("OMCH3") || c.toUpperCase().includes("MCH3"));
-  if (headerIndex === -1) return 'ไม่พบหัวตาราง OMCH3';
-
-  let dataCells = rawCells.slice(headerIndex + keys.length);
-
-  const startIndex = dataCells.indexOf('BR');
-  if (startIndex === -1) return 'ไม่พบข้อมูลเริ่มต้น BR';
-  dataCells = dataCells.slice(startIndex);
-
-  let fixedCells = [];
-  dataCells.forEach(cell => {
-    if (cell.includes(' ')) {
-      const parts = cell.split(' ').filter(c => c !== '');
-      fixedCells.push(...parts);
-    } else {
-      fixedCells.push(cell);
-    }
-  });
-
-  const knownStores = new Set(['HW', 'DW', 'DH', 'BM', 'PA', 'PB', 'HT', 'PT', 'GD', 'GG', 'BR', 'LT', 'MD', 'OD']);
   let dataRows = [];
-  let row = [];
-  for (let i = 0; i < fixedCells.length; i++) {
-    const cell = fixedCells[i];
+  for (let i = 0; i < rawCells.length; i++) {
+    const cell = rawCells[i];
     if (knownStores.has(cell)) {
-      if (row.length > 0) {
-        while (row.length < keys.length) row.push('0');
-        let obj = {};
-        keys.forEach((k, idx) => {
-          obj[k] = row[idx];
-        });
-        dataRows.push(obj);
-        row = [];
-      }
-      row.push(cell);
-    } else {
-      row.push(cell);
+      const mch3 = cell;
+      const rank = rawCells[i + 1] || "0";
+      const pos = rawCells[i + 2] || "0";
+
+      dataRows.push({
+        MCH3: mch3,
+        Rank: rank,
+        "POS + S/O": pos
+      });
+
+      i += 2;
     }
-  }
-  if (row.length > 0) {
-    while (row.length < keys.length) row.push('0');
-    let obj = {};
-    keys.forEach((k, idx) => {
-      obj[k] = row[idx];
-    });
-    dataRows.push(obj);
   }
   return dataRows;
 }
@@ -237,7 +200,7 @@ app.post('/webhook', async (req, res) => {
             const [result] = await visionClient.textDetection({ image: { content: imgBuffer } });
             const text = result.fullTextAnnotation ? result.fullTextAnnotation.text : '';
 
-            const dataRows = parseReport9Columns(text);
+            const dataRows = parseSimpleTable(text);
             if (typeof dataRows === 'string') {
               await replyMessage(event.replyToken, dataRows);
               continue;
