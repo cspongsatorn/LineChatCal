@@ -63,37 +63,77 @@ async function processSetCommand(text) {
 }
 
 // ฟังก์ชันช่วย parse ตาราง
-
+// ฟังก์ชันช่วย parse ตาราง
 function parseReport3Columns(text) {
+  const keys = [
+    'OMCH3',
+    'Rank',
+    'POS + S/O'
+  ];
 
-    let rawCells = text
+  let rawCells = text
     .split(/\s+/)
     .map(c => c.trim())
     .filter(c => c !== '');
-    console.log("OCR Lines:", rawCells); 
 
-  const dataRows = [];
-  const deptCodes = ["VS","MA","FC","LT","PB","BR","HW","DW","DH","BM","PA","PT","HT","GD"];
+  console.log("OCR Lines:", rawCells);
 
-  for (let i = 0; i < text.length; i++) {
-    if (deptCodes.includes(text[i])) {
-      const dept = text[i];
-      const rank = text[i + 1] || "";
-      const pos = text[i + 2] || "0";   // ใช้ค่าหลัง Rank แทน
-      dataRows.push({
-        OMCH3: dept,
-        Rank: rank,
-        "POS + S/O": pos
-      });
+  const headerIndex = rawCells.findIndex(
+    c => c.toUpperCase().includes("OMCH3") || c.toUpperCase().includes("MCH3")
+  );
+  if (headerIndex === -1) return 'ไม่พบหัวตาราง OMCH3';
+
+  let dataCells = rawCells.slice(headerIndex + keys.length);
+
+  // ✅ แก้ไขให้รองรับหลาย code เป็นจุดเริ่มต้น
+  const knownStores = [
+    "VS","MA","FC","LT","PB","BR","HO","SA","KC","BD",
+    "FD","PA","FT","HW","ET","DH","GD","HT","DW","OL",
+    "PT","SR","AU","BC","BM","IT","PE","GG","MD","OD"
+  ];
+
+  const startIndex = dataCells.findIndex(c => knownStores.includes(c));
+  if (startIndex === -1) return 'ไม่พบข้อมูลเริ่มต้นของสาขา/แผนก';
+  dataCells = dataCells.slice(startIndex);
+
+  // แปลงข้อมูลเป็น row
+  let dataRows = [];
+  let row = [];
+  for (let i = 0; i < dataCells.length; i++) {
+    const cell = dataCells[i];
+    if (knownStores.includes(cell)) {
+      if (row.length > 0) {
+        while (row.length < keys.length) row.push('0');
+        let obj = {};
+        keys.forEach((k, idx) => {
+          obj[k] = row[idx];
+        });
+        dataRows.push(obj);
+        row = [];
+      }
+      row.push(cell);
+    } else {
+      row.push(cell);
     }
+  }
+  if (row.length > 0) {
+    while (row.length < keys.length) row.push('0');
+    let obj = {};
+    keys.forEach((k, idx) => {
+      obj[k] = row[idx];
+    });
+    dataRows.push(obj);
   }
 
   return dataRows;
 }
 
+
+
 // ฟังก์ชัน format สรุปยอด
 function formatSummaryReport(dataRows, soExternalData, reportDate) {
-  const group1 = ['HW', 'DW', 'DH', 'BM']; // เพิ่ม BR กับ GG
+  console.log("dataRows:", dataRows);
+  const group1 = ['HW', 'DW', 'DH', 'BM', 'BR', 'GG'];
   const group2 = ['PA', 'PB', 'PT', 'HT', 'GD'];
 
   function formatNumber(num) {
@@ -103,7 +143,8 @@ function formatSummaryReport(dataRows, soExternalData, reportDate) {
 
   let message = '';
 
-  message += `แผนก HW/DW/DH/BM ส่งยอดขาย\nประจำวันที่ ${reportDate}\n\n`;
+  // ===== Group 1 =====
+  message += `แผนก HW/DW/DH/BM/BR/GG ส่งยอดขาย\nประจำวันที่ ${reportDate}\n\n`;
   group1.forEach(dept => {
     const row = dataRows.find(r => r['OMCH3'] === dept);
     if (!row) return;
@@ -115,15 +156,16 @@ function formatSummaryReport(dataRows, soExternalData, reportDate) {
     message += `${dept} ทำได้ : ${formatNumber(today)}\n`;
     message += `Diff : ${diff >= 0 ? '+' : ''}${formatNumber(diff)}\n\n`;
   });
+
   message += `ยอดขายอันดับ 1-3 \n`;
   message += `วันที่ ${reportDate} \n`;
   message += `1. \n`;
   message += `2. \n`;
   message += `3. \n\n`;
+  message += `\n-------------------------------\n\n`;
 
-  message += `-------------------------------\n\n`;
-  message += `แผนก PA/PB/HT/PT/GD ส่งยอดขาย\nประจำวันที่ ${reportDate}\n\n`;
-
+  // ===== Group 2 =====
+  message += `แผนก PA/PB/PT/HT/GD ส่งยอดขาย\nประจำวันที่ ${reportDate}\n\n`;
   group2.forEach(dept => {
     const row = dataRows.find(r => r['OMCH3'] === dept);
     if (!row) return;
@@ -135,6 +177,7 @@ function formatSummaryReport(dataRows, soExternalData, reportDate) {
     message += `${dept} ทำได้ : ${formatNumber(today)}\n`;
     message += `Diff : ${diff >= 0 ? '+' : ''}${formatNumber(diff)}\n\n`;
   });
+
   message += `ยอดขายอันดับ 1-3 PA \n`;
   message += `วันที่ ${reportDate} \n`;
   message += `1. \n`;
@@ -146,8 +189,10 @@ function formatSummaryReport(dataRows, soExternalData, reportDate) {
   message += `1. \n`;
   message += `2. \n`;
   message += `3. \n\n`;
+
   return message;
 }
+
 
 // ฟังก์ชันส่งข้อความกลับ LINE
 async function replyMessage(replyToken, text) {
