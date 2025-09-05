@@ -87,9 +87,7 @@ function parseReport3Columns(text) {
 
   // ✅ แก้ไขให้รองรับหลาย code เป็นจุดเริ่มต้น
   const knownStores = [
-    "VS","MA","FC","LT","PB","BR","HO","SA","KC","BD",
-    "FD","PA","FT","HW","ET","DH","GD","HT","DW","OL",
-    "PT","SR","AU","BC","BM","IT","PE","GG","MD","OD"
+    "HW","DW","DH","BM","PA","PB","HT","PT","GD"
   ];
 
   const startIndex = dataCells.findIndex(c => knownStores.includes(c));
@@ -133,8 +131,8 @@ function parseReport3Columns(text) {
 // ฟังก์ชัน format สรุปยอด
 function formatSummaryReport(dataRows, soExternalData, reportDate) {
   console.log("dataRows:", dataRows);
-  const group1 = ['HW', 'DW', 'DH', 'BM', 'BR', 'GG'];
-  const group2 = ['PA', 'PB', 'PT', 'HT', 'GD'];
+  const group1 = ['HW', 'DW', 'DH', 'BM'];
+  const group2 = ['PA', 'PB', 'HT', 'PT', 'GD'];
 
   function formatNumber(num) {
     if (Number.isInteger(num)) return num.toLocaleString('en-US');
@@ -144,7 +142,7 @@ function formatSummaryReport(dataRows, soExternalData, reportDate) {
   let message = '';
 
   // ===== Group 1 =====
-  message += `แผนก HW/DW/DH/BM/BR/GG ส่งยอดขาย\nประจำวันที่ ${reportDate}\n\n`;
+  message += `แผนก HW/DW/DH/BM ส่งยอดขาย\nประจำวันที่ ${reportDate}\n\n`;
   group1.forEach(dept => {
     const row = dataRows.find(r => r['OMCH3'] === dept);
     if (!row) return;
@@ -165,7 +163,7 @@ function formatSummaryReport(dataRows, soExternalData, reportDate) {
   message += `\n-------------------------------\n\n`;
 
   // ===== Group 2 =====
-  message += `แผนก PA/PB/PT/HT/GD ส่งยอดขาย\nประจำวันที่ ${reportDate}\n\n`;
+  message += `แผนก PA/PB/HT/PT/GD ส่งยอดขาย\nประจำวันที่ ${reportDate}\n\n`;
   group2.forEach(dept => {
     const row = dataRows.find(r => r['OMCH3'] === dept);
     if (!row) return;
